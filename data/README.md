@@ -1,0 +1,3 @@
+Day 1 log snippet:
+Researched open APIs to grab data from and how they come to handle latency delays etc, and also researched about MM and typical approaches to grasp the challenge.
+Implemented BinanceBook (takes diff in depth reconstruction via U/u sequence checks) and OKXBook (books5 has 5level snapshots). Binance logic deletes levels when their quantity is 0 which is standard procedure discussed online, and sequence gaps trigger a resync and to reconstruct. OKX simply overwrites the top 5 each update . Freshness is handled via the t_arrive_ns timestamp which is stored per update. Going to finish up the OKX logic next, and then handle the fair-price engine.
