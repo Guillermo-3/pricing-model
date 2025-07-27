@@ -1,0 +1,6 @@
+httpx
+websockets==12.*
+orjson
+pyarrow
+pandas
+pytest
