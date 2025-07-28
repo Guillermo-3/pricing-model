@@ -7,3 +7,6 @@ Used prior day to build off of, and implemented a latency‑weighted cross‑ven
 
 Day 3:
 Built off the prior price model to make the spread dynamic off EWMA 1‑s vol + top‑5 imbalance, and added a simple inventory skew. Brought the connectors fully live: buffer‑first WS + REST snapshot sync (Binance U/u gate) and OKX books5 as 5‑level snapshots; switched REST to httpx.AsyncClient, added backoff + payload checks. Kept the latency‑weighted cross‑venue mid with a 0.5s freshness filter; need to compute imbalance from top‑5 if a venue doesn’t send it, persist inventory, tune λ/a/b/κ on tape, and add markout/realized‑spread backtests.
+
+Day 4:
+Short day working, fixed the binance connector to Binance.us to fix the issue with geolocation restrictions on binance.com. Implemented the official snapshot + U/u diff bootstrap with the bridging rule and unwrapped combined stream payloads. The venue now blends venues with 1/age + epsilon weights and drops anything staler than 0.5s successfully. This should allow for more up to date estimates of fair mid price due to newest information carrying more weight.

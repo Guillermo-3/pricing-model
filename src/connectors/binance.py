@@ -1,76 +1,76 @@
+# src/connectors/binance.py
 import asyncio, json, time, httpx, websockets
+from collections import deque
 from src.core.book import BinanceBook
 
-REST = "https://api.binance.com/api/v3/depth"
-WS   = "wss://stream.binance.com:9443/ws/{sym}@depth@100ms"
+REST = "https://api.binance.us/api/v3/depth"
+WS   = "wss://stream.binance.us:9443/ws/{sym}@depth@100ms"
+STALE_RETRY = 0.05
 
-async def snapshot(symbol: str = "BTCUSDT"):
+async def get_snapshot(symbol: str):
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(REST, params={"symbol": symbol.upper(), "limit": 1000})
-    resp.raise_for_status()
-    data = resp.json()
-    if isinstance(data, dict) and "code" in data:
-        raise RuntimeError(f"Binance API error {data.get('code')}: {data.get('msg')}")
-    return data["lastUpdateId"], data["bids"], data["asks"]
+        r = await client.get(REST, params={"symbol": symbol.upper(), "limit": 1000})
+        r.raise_for_status()
+        j = r.json()
+        if isinstance(j, dict) and "code" in j:
+            raise RuntimeError(f"Binance API error {j.get('code')}: {j.get('msg')}")
+        return j["lastUpdateId"], j["bids"], j["asks"]
 
-async def stream(queue, symbol="BTCUSDT"):
+async def stream(queue: asyncio.Queue, symbol: str = "BTCUSDT"):
+    url  = WS.format(sym=symbol.lower())
     book = BinanceBook(symbol)
-    url = WS.format(sym=symbol.lower())
 
     while True:
+        pump_task = None
         try:
-            async with websockets.connect(url, ping_interval=20, max_size=2**20) as ws:
-                buf = asyncio.Queue(maxsize=20000)
-
-                async def reader():
+            buf = deque()  
+            async with websockets.connect(url, ping_interval=20, max_size=2**22) as ws:
+                async def pump():
                     async for raw in ws:
+                        t = time.time_ns()
                         msg = json.loads(raw)
-                        # only depth updates have U/u
-                        if "U" in msg and "u" in msg:
-                            await buf.put((time.time_ns(), msg))
+                        ev  = msg.get("data", msg) 
+                        if ev.get("e") == "depthUpdate" and "U" in ev and "u" in ev:
+                            buf.append((t, ev))
+                pump_task = asyncio.create_task(pump())
 
-                reader_task = asyncio.create_task(reader())
+                while not buf:
+                    await asyncio.sleep(0.01)
+                first_U = buf[0][1]["U"]
 
-                # Grab the earliest buffered event
-                first_t, first_msg = await buf.get()
-                U0, u0 = first_msg["U"], first_msg["u"]
-
-                # Snapshot; if it's behind first.U, resnapshot until it's not
                 while True:
-                    last_id, bids, asks = await snapshot(symbol)
-                    if last_id < U0:
-                        # snapshot too old vs earliest buffered event; take another
-                        first_t, first_msg = await buf.get()
-                        U0, u0 = first_msg["U"], first_msg["u"]
-                        continue
-                    break
+                    last_id, bids, asks = await get_snapshot(symbol)
+                    if last_id >= first_U:
+                        break
+                    await asyncio.sleep(STALE_RETRY)
 
-                # Load the snapshot
                 book.load_snapshot(last_id, bids, asks)
 
-                # Drop buffered events with u <= last_id until we hit U <= last_id <= u
-                # Process that one, then continue live.
-                apply_queue = [(first_t, first_msg)]
-                while apply_queue:
-                    t_arrive, msg = apply_queue.pop(0)
-                    U, u = msg["U"], msg["u"]
-                    if u <= last_id:
-                        continue
-                    if U <= last_id <= u:
-                        book.apply_diff(msg, t_arrive)
-                        await queue.put(("binance", symbol, book.view()))
-                        last_id = u  # local book update id
-                        break
-                    # If we’re ahead of the book, our snapshot got invalid; restart outer loop
-                    # (rare but per spec – restart if U > last_id).
-                    if U > last_id:
-                        raise RuntimeError("Binance book desync during sync gate; restarting")
+                while buf and buf[0][1]["u"] <= last_id:
+                    buf.popleft()
 
-                # Drain remaining buffered, then steady-state
-                while True:
-                    t_arrive, msg = await buf.get()
-                    book.apply_diff(msg, t_arrive)
+                while not buf or not (buf[0][1]["U"] <= last_id + 1 <= buf[0][1]["u"]):
+                    await asyncio.sleep(0.01)
+                    if len(buf) > 5000:
+                        raise RuntimeError("Gate mismatch; restarting sync")
+
+                while buf:
+                    t_arrive, ev = buf.popleft()
+                    book.apply_diff(ev, t_arrive)
+                    last_id = book.last_update_id
                     await queue.put(("binance", symbol, book.view()))
+
+                while True:
+                    while buf:
+                        t_arrive, ev = buf.popleft()
+                        book.apply_diff(ev, t_arrive)
+                        last_id = book.last_update_id
+                        await queue.put(("binance", symbol, book.view()))
+                    await asyncio.sleep(0.001)
+
         except Exception:
+            if pump_task:
+                with contextlib.suppress(Exception):
+                    pump_task.cancel()
             await asyncio.sleep(0.5)
             continue
