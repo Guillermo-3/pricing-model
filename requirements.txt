@@ -4,3 +4,6 @@ orjson
 pyarrow
 pandas
 pytest
+six-1.17.0
+matplotlib
+sklearn
